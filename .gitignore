@@ -1,0 +1,25 @@
+# PlatformIO
+.pio/
+.vscode/
+.pioenvs/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Credentials (never commit)
+src/wifi_credentials.h
+archive/esp8266-bridge/wifi_credentials.ini
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
