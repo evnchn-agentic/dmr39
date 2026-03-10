@@ -287,6 +287,10 @@ The SSH lockout incident is a cautionary tale. The AI tried the obvious approach
 
 The conversation transcripts span 20,000+ lines and 63MB+ across multiple sessions, documenting what genuine reverse engineering looks like when the engineer is a language model: wrong hypotheses tested and discarded, hardware limitations hit and worked around, over-engineered solutions simplified, and the AI occasionally locking itself out of routers.
 
+## Future Expansion
+
+See [STRETCH-GOALS.md](archive/esp8266-bridge/docs/STRETCH-GOALS.md#future-expansion) for planned features: live subtitle OCR, IR receiver as home automation trigger, and web-based IR learning mode.
+
 ## Building
 
 ```bash
