@@ -13,7 +13,7 @@
 
 A complete system for remotely viewing and controlling a SUPER DMR-39 digital TV set-top box over the network.
 
-![The SUPER DMR-39 — a 2016-era Hong Kong DVB-T2 receiver](archive/images/stb-product.jpg)
+![The SUPER DMR-39 — a 2016-era Hong Kong DVB-T2 receiver](archive/images/stb-product.png)
 
 The DMR-39 is a 2016-era Hong Kong DVB-T2 receiver (board code `MSD7816_88969T_608_148mm_NP`, firmware `V1.01 2016.04.02`). It has no Ethernet, no Bluetooth, and no documented protocol. The USB port is for DVR recording and firmware updates only — neither of which is useful here. The only viable interfaces are a 38kHz IR receiver and a 5-pin I2C front panel connector. As of March 2026, it turns 10 years old next month.
 
