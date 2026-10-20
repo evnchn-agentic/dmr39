@@ -8,6 +8,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoOTA.h>
+#include <esp_task_wdt.h>
+#include <esp_idf_version.h>
 #include <IRrecv.h>
 #include <IRremoteESP8266.h>
 #include <IRtext.h>
@@ -31,6 +33,54 @@ static uint16_t lastRaw[256];
 static uint16_t lastRawLen = 0;
 static decode_type_t lastProto = decode_type_t::UNKNOWN;
 static uint64_t lastValue = 0;
+
+// === Stay-online: reconnect with backoff + watchdogs ===
+// Optional static IP: define STATIC_IP/GATEWAY/SUBNET (e.g. "192.168.50.214") in wifi_credentials.h
+#define WIFI_REBOOT_MS   (10UL * 60UL * 1000UL)  // reboot if WiFi down this long
+#define TASK_WDT_S       30                      // hang watchdog on loop()
+static volatile uint32_t wifiDownSince = 0;       // 0 = connected
+static volatile uint32_t nextRetryAt = 0;
+static uint32_t retryDelayMs = 1000;
+
+static void onWiFiEvent(WiFiEvent_t ev) {
+    if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        if (!wifiDownSince) { wifiDownSince = millis() ? millis() : 1; retryDelayMs = 1000; nextRetryAt = millis() + retryDelayMs; }
+    } else if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+        wifiDownSince = 0; retryDelayMs = 1000;
+    }
+}
+
+static void wifiBegin() {
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname("dmr39-ir");  // DHCP hostname so the router lists it
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+#ifdef STATIC_IP
+    IPAddress ip, gw, sn;
+    if (ip.fromString(STATIC_IP) && gw.fromString(GATEWAY) && sn.fromString(SUBNET))
+        WiFi.config(ip, gw, sn, gw);
+#endif
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+}
+
+static void wifiService() {
+    uint32_t now = millis();
+    if (WiFi.status() == WL_CONNECTED) { wifiDownSince = 0; return; }
+    if (!wifiDownSince) wifiDownSince = now ? now : 1;
+    if (now - wifiDownSince > WIFI_REBOOT_MS) {
+        Serial.println(F("[WiFi] down too long, rebooting"));
+        delay(100);
+        ESP.restart();
+    }
+    if ((int32_t)(now - nextRetryAt) >= 0) {
+        Serial.printf("[WiFi] retry (backoff %lums)\n", (unsigned long)retryDelayMs);
+        WiFi.disconnect(false);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        retryDelayMs = retryDelayMs >= 60000 ? 60000 : retryDelayMs * 2;
+        nextRetryAt = now + retryDelayMs;
+    }
+}
 
 // === NEC TX on demodulated line (mark=LOW, space=HIGH) ===
 static void sendNEC(uint32_t code) {
@@ -236,11 +286,11 @@ void setup() {
     digitalWrite(IR_TX_PIN, HIGH);
     pinMode(STB_VCC, INPUT);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.onEvent(onWiFiEvent);
+    wifiBegin();
     Serial.printf("WiFi: %s", WIFI_SSID);
     for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); }
-    Serial.println(WiFi.isConnected() ? String("\nIP: ") + WiFi.localIP().toString() : "\nWiFi FAIL");
+    Serial.println(WiFi.isConnected() ? String("\nIP: ") + WiFi.localIP().toString() : "\nWiFi FAIL (will keep retrying)");
 
     // OTA with password
     ArduinoOTA.setHostname("dmr39-ir");
@@ -262,10 +312,19 @@ void setup() {
 
     irrecv.setUnknownThreshold(12);
     irrecv.enableIRIn();
+#if ESP_IDF_VERSION_MAJOR >= 5
+    esp_task_wdt_config_t wdt = { .timeout_ms = TASK_WDT_S * 1000, .idle_core_mask = 0, .trigger_panic = true };
+    if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
+#else
+    esp_task_wdt_init(TASK_WDT_S, true);
+#endif
+    esp_task_wdt_add(NULL);  // subscribe loop task: a hang reboots the board
     Serial.println(F("Ready. OTA enabled. Type ? for help.\n"));
 }
 
 void loop() {
+    esp_task_wdt_reset();
+    wifiService();
     ArduinoOTA.handle();
     server.handleClient();
 
@@ -296,10 +355,6 @@ void loop() {
     static uint32_t lastAlive = 0;
     if (millis() - lastAlive > 30000) {
         lastAlive = millis();
-        if (!WiFi.isConnected()) {
-            Serial.println("[WiFi] Reconnecting...");
-            WiFi.reconnect();
-        }
         Serial.printf("[%lu] alive vcc=%d caps=%d ip=%s\n",
             millis(), digitalRead(STB_VCC), captureNum,
             WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "none");
