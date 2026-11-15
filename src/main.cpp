@@ -302,6 +302,7 @@ void setup() {
     ArduinoOTA.onEnd([]()   { Serial.println("\n[OTA] Done"); });
     ArduinoOTA.onError([](ota_error_t e) { Serial.printf("[OTA] Error %u\n", e); });
     ArduinoOTA.onProgress([](unsigned int prog, unsigned int total) {
+        esp_task_wdt_reset();  // the whole upload runs inside ArduinoOTA.handle(), longer than TASK_WDT_S
         Serial.printf("[OTA] %u%%\r", prog * 100 / total);
     });
     ArduinoOTA.begin();
