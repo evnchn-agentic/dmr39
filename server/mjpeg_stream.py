@@ -22,6 +22,7 @@ PORT = 8889
 HLS_DIR = "/tmp/hdmi-hls"
 ESP32_URL = "http://192.168.50.214"
 NONCE_TTL = 3600  # 1 hour
+NONCE_MAX = 1000  # GET / and /nonce need no auth, so without a cap a request loop grows the store for an hour
 FRAME_PATH = "/dev/shm/dmr39.jpg"
 RESTART_EVERY = 24 * 3600
 
@@ -45,6 +46,9 @@ def issue_nonce():
         expired = [k for k, v in valid_nonces.items() if v < now]
         for k in expired:
             del valid_nonces[k]
+        # ponytail: oldest-first eviction; a flood can evict a viewer's nonce, whose page refetches one on 403
+        while len(valid_nonces) >= NONCE_MAX:
+            del valid_nonces[next(iter(valid_nonces))]
         valid_nonces[token] = now + NONCE_TTL
     return token
 
