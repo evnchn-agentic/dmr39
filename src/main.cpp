@@ -70,7 +70,7 @@ static void wifiService() {
         Serial.printf("[WiFi] retry (backoff %lums)\n", (unsigned long)retryDelayMs);
         WiFi.disconnect(false);
         WiFi.begin(WIFI_SSID, WIFI_PASS);
-        retryDelayMs = retryDelayMs >= 60000 ? 60000 : retryDelayMs * 2;
+        retryDelayMs = retryDelayMs >= 30000 ? 60000 : retryDelayMs * 2;
         nextRetryAt = now + retryDelayMs;
     }
 }
