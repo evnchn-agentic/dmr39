@@ -38,21 +38,14 @@ static uint64_t lastValue = 0;
 // Optional static IP: define STATIC_IP/GATEWAY/SUBNET (e.g. "192.168.50.214") in wifi_credentials.h
 #define WIFI_REBOOT_MS   (10UL * 60UL * 1000UL)  // reboot if WiFi down this long
 #define TASK_WDT_S       30                      // hang watchdog on loop()
-static volatile uint32_t wifiDownSince = 0;       // 0 = connected
-static volatile uint32_t nextRetryAt = 0;
+// Owned by wifiService() alone: a WiFi event handler writing these raced the loop task
+static uint32_t wifiDownSince = 0;       // 0 = connected
+static uint32_t nextRetryAt = 0;
 static uint32_t retryDelayMs = 1000;
 
-static void onWiFiEvent(WiFiEvent_t ev) {
-    if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-        if (!wifiDownSince) { wifiDownSince = millis() ? millis() : 1; retryDelayMs = 1000; nextRetryAt = millis() + retryDelayMs; }
-    } else if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-        wifiDownSince = 0; retryDelayMs = 1000;
-    }
-}
-
 static void wifiBegin() {
+    WiFi.setHostname("dmr39-ir");  // DHCP hostname so the router lists it; mode() applies it
     WiFi.mode(WIFI_STA);
-    WiFi.setHostname("dmr39-ir");  // DHCP hostname so the router lists it
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
     WiFi.setSleep(false);
@@ -67,7 +60,7 @@ static void wifiBegin() {
 static void wifiService() {
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) { wifiDownSince = 0; return; }
-    if (!wifiDownSince) wifiDownSince = now ? now : 1;
+    if (!wifiDownSince) { wifiDownSince = now ? now : 1; retryDelayMs = 1000; nextRetryAt = now + retryDelayMs; }
     if (now - wifiDownSince > WIFI_REBOOT_MS) {
         Serial.println(F("[WiFi] down too long, rebooting"));
         delay(100);
@@ -286,7 +279,6 @@ void setup() {
     digitalWrite(IR_TX_PIN, HIGH);
     pinMode(STB_VCC, INPUT);
 
-    WiFi.onEvent(onWiFiEvent);
     wifiBegin();
     Serial.printf("WiFi: %s", WIFI_SSID);
     for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); }
