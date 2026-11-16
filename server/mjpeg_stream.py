@@ -22,6 +22,8 @@ PORT = 8889
 HLS_DIR = "/tmp/hdmi-hls"
 ESP32_URL = "http://192.168.50.214"
 NONCE_TTL = 3600  # 1 hour
+FRAME_PATH = "/dev/shm/dmr39.jpg"
+RESTART_EVERY = 24 * 3600
 
 # VAAPI driver: iHD for Gen9+ (Jasper Lake, etc), i965 for Ivy Bridge
 if "LIBVA_DRIVER_NAME" not in os.environ:
@@ -66,38 +68,64 @@ def hls_loop():
             except FileNotFoundError:
                 pass
         proc = subprocess.Popen([
-            "ffmpeg",
+            "ffmpeg", "-y",
             "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+            # wallclock on video too: otherwise ffmpeg drops the v4l2 timestamps,
+            # counts frames, and drifts vs the wallclock-stamped ALSA audio (~3 s after 3 months)
+            "-use_wallclock_as_timestamps", "1", "-thread_queue_size", "64",
             "-f", "v4l2", "-input_format", "mjpeg",
             "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS),
             "-i", DEVICE,
-            "-f", "alsa", "-i", AUDIO_DEV,
+            "-thread_queue_size", "1024", "-f", "alsa", "-i", AUDIO_DEV,
+            # output 1: HLS with audio (watch mode)
+            "-map", "0:v", "-map", "1:a",
             "-vf", "format=nv12,hwupload",
-            "-c:v", "h264_vaapi", "-g", "20",
+            "-af", "aresample=async=1000",  # smooth ALSA timestamp jitter (was +-3 ms steps -> clicks)
+            "-c:v", "h264_vaapi", "-g", str(FPS),  # keyframe every 1 s = real 1 s segments
             "-qp", "23",
             "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
             "-f", "hls",
             "-hls_time", "1",
             "-hls_list_size", "5",
             "-hls_flags", "delete_segments+independent_segments",
+            "-hls_start_number_source", "epoch",  # sequence numbers stay unique across restarts
             "-hls_segment_filename", os.path.join(HLS_DIR, "seg%03d.ts"),
             os.path.join(HLS_DIR, "stream.m3u8"),
+            # output 2: latest camera JPEG, stream copy (remote mode, no audio, ~0 CPU)
+            "-map", "0:v", "-c:v", "copy",
+            "-f", "image2", "-update", "1", "-atomic_writing", "1", FRAME_PATH,
         ], stderr=subprocess.DEVNULL)
-        proc.wait()
+        try:
+            # ponytail: daily restart bounds any residual A/V drift; drop once wallclock fix proves out
+            proc.wait(timeout=RESTART_EVERY)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait()
         print(f"ffmpeg exited with code {proc.returncode}, restarting in 3s...")
         time.sleep(3)
 
 def make_page(nonce):
     return f"""<!DOCTYPE html>
 <html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>DMR-39 TV</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#111;font-family:system-ui,sans-serif;display:flex;height:100vh;height:100dvh;overflow:hidden}}
-#tv{{flex:1;display:flex;align-items:center;justify-content:center;background:#000;min-width:0}}
-video{{max-width:100%;max-height:100%;object-fit:contain}}
-#rc{{width:260px;min-width:260px;background:#1a1a1a;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:3px}}
+html,body{{height:100%}}
+body{{background:#000;font-family:system-ui,sans-serif;overflow:hidden}}
+#v,#mj{{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}}
+#mj{{display:none}}
+#fab{{position:fixed;top:12px;left:12px;width:48px;height:48px;border-radius:50%;background:rgba(40,40,40,.8);box-shadow:0 0 10px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;touch-action:none;user-select:none;-webkit-tap-highlight-color:transparent}}
+#fab.on{{background:rgba(30,90,160,.9)}}
+#fsb{{position:fixed;top:68px;left:12px;width:48px;height:48px;border-radius:50%;background:rgba(40,40,40,.8);box-shadow:0 0 10px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;user-select:none;-webkit-tap-highlight-color:transparent}}
+#rc{{position:fixed;top:12px;right:12px;bottom:12px;width:236px;background:rgba(26,26,26,.92);border-radius:14px;overflow-y:auto;padding:8px;display:none;flex-direction:column;gap:3px;z-index:9}}
+#rc.open{{display:flex}}
+#hd{{display:flex;justify-content:space-between;align-items:center;color:#8ab;font-size:10px;padding:2px 2px 4px}}
+#cl{{color:#aaa;font-size:16px;cursor:pointer;padding:0 6px}}
+#mute{{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#ddd;font-size:12px;padding:6px 14px;border-radius:16px;cursor:pointer;z-index:8}}
 .g3{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}}
 .g4{{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px}}
 .b{{background:#333;border:1px solid #555;border-radius:6px;color:#ccc;font-size:10px;padding:8px 2px;cursor:pointer;text-align:center;user-select:none;-webkit-tap-highlight-color:transparent;min-height:36px;display:flex;align-items:center;justify-content:center}}
@@ -110,20 +138,21 @@ video{{max-width:100%;max-height:100%;object-fit:contain}}
 .x{{visibility:hidden}}
 .sep{{border-top:1px solid #333;margin:4px 0}}
 #L{{color:#0a0;font-size:9px;text-align:center;padding:3px;min-height:14px}}
-#bar{{position:fixed;bottom:0;left:0;right:260px;background:rgba(0,0,0,0.7);color:#aaa;font:11px monospace;padding:3px 8px;text-align:center;cursor:pointer}}
 @media(max-width:700px){{
-  body{{flex-direction:column}}
-  #tv{{height:40vh;height:40dvh;min-height:200px}}
-  #rc{{width:100%;max-width:280px;min-width:0;flex:1;margin:0 auto;overflow-y:auto}}
-  #bar{{right:0;bottom:auto;top:0}}
+  #rc{{top:auto;left:0;right:0;bottom:0;width:auto;max-height:62vh;max-height:62dvh;border-radius:14px 14px 0 0}}
+  #rc>*{{width:100%;max-width:280px;margin-left:auto;margin-right:auto}}
+  #mj{{bottom:auto;height:38vh;height:38dvh}}
 }}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 </head><body>
-<div id="tv">
 <video id="v" autoplay muted playsinline></video>
-</div>
+<img id="mj" alt="">
+<div id="fab" title="Remote"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ddd" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="1.5"/><path d="M10 12h4M10 15h4M10 18h4"/></svg></div>
+<div id="fsb" title="Full screen"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ddd" stroke-width="2"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></div>
+<div id="mute">Tap for sound</div>
 <div id="rc">
+<div id="hd"><span>FAST view &middot; no audio</span><span id="cl">&times;</span></div>
 <div class="g3">
  <div class="b pw" onclick="s('9A65')">POWER</div>
  <div class="b x"></div>
@@ -182,22 +211,98 @@ video{{max-width:100%;max-height:100%;object-fit:contain}}
 </div>
 <div id="L"></div>
 </div>
-<div id="bar">Click to unmute</div>
 <script>
-var T='{nonce}';
-function s(c){{
- document.getElementById('L').textContent='...';
- fetch('/ir?code='+c+'&t='+T).then(function(r){{return r.text()}}).then(function(t){{document.getElementById('L').textContent=t}}).catch(function(e){{document.getElementById('L').textContent='ERR'}});
+var T='{nonce}', SRC='/hls/stream.m3u8';
+var v=document.getElementById('v'), mj=document.getElementById('mj'), fab=document.getElementById('fab'),
+    rc=document.getElementById('rc'), L=document.getElementById('L'), mute=document.getElementById('mute'), hls=null;
+function s(c,retried){{
+ L.textContent='...';
+ fetch('/ir?code='+c+'&t='+T).then(function(r){{
+  if(r.status===403&&!retried)  // nonce gone (server restart or 1 h TTL): get a fresh one, retry once
+   return fetch('/nonce').then(function(n){{return n.text()}}).then(function(n){{T=n;s(c,true)}});
+  return r.text().then(function(t){{L.textContent=t}});
+ }}).catch(function(){{L.textContent='ERR'}});
 }}
-var v=document.getElementById('v'), bar=document.getElementById('bar');
-if(Hls.isSupported()){{
- var hls=new Hls({{liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,lowLatencyMode:true}});
- hls.loadSource('/hls/stream.m3u8');
- hls.attachMedia(v);
- hls.on(Hls.Events.MANIFEST_PARSED,function(){{v.play();bar.textContent='Muted - click to unmute'}});
- hls.on(Hls.Events.ERROR,function(e,d){{bar.textContent='HLS: '+d.details;if(d.fatal)setTimeout(function(){{hls.loadSource('/hls/stream.m3u8');hls.attachMedia(v)}},3000)}});
-}}else if(v.canPlayType('application/vnd.apple.mpegurl')){{v.src='/hls/stream.m3u8';v.play()}}
-bar.addEventListener('click',function(){{v.muted=false;bar.textContent='Audio on'}});
+function live(){{
+ if(window.Hls&&Hls.isSupported()){{
+  if(!hls){{
+   hls=new Hls({{liveSyncDurationCount:2,liveMaxLatencyDurationCount:4}});
+   hls.attachMedia(v);
+   hls.on(Hls.Events.ERROR,function(e,d){{if(d.fatal)setTimeout(function(){{hls.loadSource(SRC)}},3000)}});
+  }}
+  hls.loadSource(SRC);
+ }}else v.src=SRC;
+ v.play().catch(function(){{}});
+}}
+// Fast view: read the multipart stream ourselves (Chromium's <img> multipart stalls),
+// show the newest JPEG, reconnect if the stream ends while the remote is open.
+var ac=null, prevUrl=null;
+function mjStop(){{ if(ac){{ac.abort();ac=null}} }}
+function mjStart(){{
+ mjStop(); var my=ac=new AbortController();
+ fetch('/mjpeg?raw',{{signal:my.signal}}).then(function(r){{
+  var rd=r.body.getReader(), buf=new Uint8Array(0), dec=new TextDecoder('latin1');
+  function pump(){{ return rd.read().then(function(x){{
+   if(x.done)return;
+   var b=new Uint8Array(buf.length+x.value.length); b.set(buf); b.set(x.value,buf.length); buf=b;
+   var frame=null;
+   for(;;){{
+    var m=/Content-Length: (\\d+)\\r\\n\\r\\n/.exec(dec.decode(buf.subarray(0,Math.min(buf.length,200))));
+    if(!m)break; var st=m.index+m[0].length, n=+m[1];
+    if(buf.length<st+n)break;
+    frame=buf.slice(st,st+n); buf=buf.slice(st+n);
+   }}
+   if(frame){{ var u=URL.createObjectURL(new Blob([frame],{{type:'image/jpeg'}})); mj.src=u; if(prevUrl)URL.revokeObjectURL(prevUrl); prevUrl=u; }}
+   return pump();
+  }}); }}
+  return pump();
+ }}).catch(function(){{}}).then(function(){{ setTimeout(function(){{ if(ac===my&&rc.classList.contains('open'))mjStart() }},500) }});
+}}
+function setOpen(open){{
+ rc.classList.toggle('open',open); fab.classList.toggle('on',open);
+ if(open){{  // remote mode: ~1 s button-to-picture; pause HLS so it stops downloading
+  if(hls)hls.stopLoad(); v.pause(); v.style.display='none';
+  mj.style.display='block'; mute.style.display='none'; mjStart();
+ }}else{{    // watch mode: HLS with audio, rejoin at live edge
+  mjStop(); mj.style.display='none'; v.style.display='block';
+  live(); mute.style.display=v.muted?'block':'none';
+ }}
+}}
+document.getElementById('cl').onclick=function(){{setOpen(false)}};
+// full screen: whole page where the browser allows it (desktop, Android, iPad);
+// iPhone only allows the native video player, so drop to watch mode and use that
+var fsb=document.getElementById('fsb'), de=document.documentElement;
+function placeFsb(){{ fsb.style.left=fab.offsetLeft+'px'; fsb.style.top=(fab.offsetTop+56)+'px'; }}
+fsb.onclick=function(){{
+ if(document.fullscreenElement||document.webkitFullscreenElement){{
+  (document.exitFullscreen||document.webkitExitFullscreen).call(document);
+ }}else if(document.fullscreenEnabled||document.webkitFullscreenEnabled){{
+  (de.requestFullscreen||de.webkitRequestFullscreen).call(de);
+ }}else if(v.webkitEnterFullscreen){{
+  if(rc.classList.contains('open')){{ setOpen(false); return; }}  // video must be loaded first
+  try{{ v.webkitEnterFullscreen(); }}catch(e){{}}
+ }}
+}};
+mute.onclick=function(){{v.muted=false;v.play();mute.style.display='none'}};
+// draggable FAB (position remembered), tap toggles the remote
+(function(){{
+ var sx,sy,ox,oy,moved=false,down=false;
+ try{{var p=JSON.parse(localStorage.getItem('dmr39-fab'));if(p){{fab.style.left=p[0]+'px';fab.style.top=p[1]+'px'}}}}catch(e){{}}
+ placeFsb();
+ fab.addEventListener('pointerdown',function(e){{down=true;moved=false;sx=e.clientX;sy=e.clientY;ox=fab.offsetLeft;oy=fab.offsetTop;fab.setPointerCapture(e.pointerId)}});
+ fab.addEventListener('pointermove',function(e){{
+  if(!down)return; var dx=e.clientX-sx, dy=e.clientY-sy;
+  if(!moved&&Math.abs(dx)+Math.abs(dy)<6)return; moved=true;
+  fab.style.left=Math.max(0,Math.min(innerWidth-48,ox+dx))+'px';
+  fab.style.top=Math.max(0,Math.min(innerHeight-104,oy+dy))+'px'; placeFsb();
+ }});
+ fab.addEventListener('pointerup',function(){{
+  down=false;
+  if(moved){{try{{localStorage.setItem('dmr39-fab',JSON.stringify([fab.offsetLeft,fab.offsetTop]))}}catch(e){{}}}}
+  else setOpen(!rc.classList.contains('open'));
+ }});
+}})();
+setOpen(false);
 </script>
 </body></html>""".encode()
 
@@ -229,6 +334,45 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-cache" if fname.endswith(".m3u8") else "max-age=10")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        if self.path.startswith("/mjpeg"):
+            self.send_response(200)
+            # the page reads ?raw with fetch(); WebKit never hands a multipart body to fetch readers
+            raw = "raw" in self.path
+            self.send_header("Content-Type", "application/octet-stream" if raw
+                             else "multipart/x-mixed-replace; boundary=f")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            last = 0
+            end = time.time() + 600  # cap: a leaked stream can't hold a thread forever
+            self.connection.settimeout(10)  # a client that stops reading can't block write() forever
+            try:
+                while time.time() < end:
+                    try:
+                        m = os.stat(FRAME_PATH).st_mtime_ns
+                        if m != last:
+                            with open(FRAME_PATH, "rb") as f:
+                                data = f.read()
+                            last = m
+                            self.wfile.write(b"--f\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                             + str(len(data)).encode() + b"\r\n\r\n" + data + b"\r\n")
+                    except FileNotFoundError:
+                        pass
+                    time.sleep(0.03)
+            except OSError:  # broken pipe, reset, write timeout
+                pass
+            return
+
+        if self.path == "/nonce":
+            # no CORS header, so other sites can't read it: same protection as the nonce in the page
+            data = issue_nonce().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
             return
